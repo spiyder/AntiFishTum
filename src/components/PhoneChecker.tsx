@@ -65,6 +65,13 @@ interface ApiResult {
   abstIntlFormat: string | null;
   abstLocalFormat: string | null;
   abstType: string | null;
+  // Voxlink
+  voxlinkAvailable: boolean;
+  voxlinkOperator: string | null;
+  voxlinkRegion: string | null;
+  voxlinkTimeZone: string | null;
+  voxlinkMNP: boolean;
+  voxlinkMNPFrom: string | null;
 }
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -149,6 +156,7 @@ const STEPS = [
   "Запрос к numverify...",
   "Запрос к IPQualityScore...",
   "Запрос к AbstractAPI...",
+  "Запрос к Voxlink NUM...",
   "Проверяем базу мошеннических номеров...",
   "Анализируем сигналы риска...",
   "Формируем полный отчёт...",
@@ -240,7 +248,7 @@ export function PhoneChecker() {
           </div>
           <div>
             <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Проверка телефонного номера</h3>
-            <p className="text-xs text-zinc-500 mt-0.5">numverify · IPQualityScore · AbstractAPI · База мошенников · Анализ паттернов</p>
+            <p className="text-xs text-zinc-500 mt-0.5">numverify · IPQualityScore · AbstractAPI · Voxlink NUM · База мошенников · Анализ паттернов</p>
           </div>
         </div>
         <div className="flex gap-3">
@@ -446,6 +454,46 @@ export function PhoneChecker() {
             </Card>
           )}
 
+          {/* Voxlink block */}
+          {result.voxlinkAvailable && (
+            <Card className="p-5 bg-white dark:bg-zinc-900/60 border-zinc-200 dark:border-zinc-800">
+              <div className="flex items-center gap-2 mb-4">
+                <div className="w-2 h-2 rounded-full bg-teal-500"/>
+                <h4 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Voxlink NUM — российская база операторов</h4>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Оператор</span>
+                  <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{result.voxlinkOperator ?? "—"}</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Регион</span>
+                  <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{result.voxlinkRegion ?? "—"}</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Часовой пояс</span>
+                  <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{result.voxlinkTimeZone ?? "—"}</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Перенос (MNP)</span>
+                  <span className={`px-2 py-0.5 rounded text-[11px] font-semibold border w-fit ${
+                    result.voxlinkMNP
+                      ? "bg-amber-100 dark:bg-amber-500/10 border-amber-300 dark:border-amber-500/30 text-amber-700 dark:text-amber-400"
+                      : "bg-zinc-100 dark:bg-zinc-800 border-zinc-300 dark:border-zinc-600 text-zinc-500 dark:text-zinc-400"
+                  }`}>
+                    {result.voxlinkMNP ? "Перенесён" : "Нет"}
+                  </span>
+                </div>
+              </div>
+              {result.voxlinkMNP && result.voxlinkMNPFrom && (
+                <div className="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-700">
+                  <p className="text-xs text-zinc-400 mb-1">Изначальный оператор (до переноса)</p>
+                  <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{result.voxlinkMNPFrom}</p>
+                </div>
+              )}
+            </Card>
+          )}
+
           {/* Caller info banner */}
           {(displayCity || displayCarrier) && (
             <Card className="p-4 bg-blue-50 dark:bg-blue-500/5 border-blue-200 dark:border-blue-500/20">
@@ -517,7 +565,7 @@ export function PhoneChecker() {
           </Card>
 
           <p className="text-xs text-zinc-400 dark:text-zinc-600 text-center px-4">
-            Данные: numverify.com · ipqualityscore.com · abstractapi.com · внутренняя база паттернов
+            Данные: numverify.com · ipqualityscore.com · abstractapi.com · num.voxlink.ru · внутренняя база паттернов
           </p>
         </div>
       )}
