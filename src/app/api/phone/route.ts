@@ -89,7 +89,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "API ключи не заданы в .env.local" }, { status: 500 });
     }
 
-    // ── Parallel API calls: numverify + IPQS + AbstractAPI + fraud DB ──
+    // --- 1. ПЕРЕМЕННЫЕ РИСКА (ОБЪЯВЛЕНЫ В НАЧАЛЕ) ---
+    const warnings: Warning[] = [];
+    let riskScore = 0;
+
+    // ── Parallel API calls ──
     const nvUrl         = `${NUMVERIFY_BASE}?access_key=${NUMVERIFY_KEY}&number=${encodeURIComponent(phone.trim())}&format=1`;
     const ipqsUrl       = `${IPQS_BASE}/${IPQS_KEY}/${encodeURIComponent(phone.trim())}?strictness=1&allow_prepaid=true`;
     const abstractUrl   = `${ABSTRACTAPI_BASE}/?api_key=${ABSTRACTAPI_KEY}&phone=${encodeURIComponent(phone.trim())}`;
@@ -121,12 +125,11 @@ export async function POST(req: NextRequest) {
       if (parsed?.phone) abst = parsed;
     }
 
-    // If all three failed, return error
     if (!nv && !ipqs && !abst) {
       return NextResponse.json({ error: "Не удалось получить данные от API" }, { status: 502 });
     }
 
-    // ── AbstractAPI signals ──
+    // --- 2. ОБРАБОТКА ABSTRACT API ---
     let abstValid:        boolean | null = null;
     let abstLineType:     string  | null = null;
     let abstCarrier:      string  | null = null;
@@ -148,13 +151,11 @@ export async function POST(req: NextRequest) {
       abstType          = abst.type ?? null;
       abstLineType      = abstType;
 
-      // Validity cross-check
-      if (abstValid === false && !warnings.some(w => w.text.includes("валидацию"))) {
+      if (abstValid === false) {
         warnings.push({ text: "AbstractAPI: номер не прошёл валидацию — возможно недействительный", severity: "high" });
         riskScore += 25;
       }
 
-      // Line type risk
       if (abstType === "VOIP" && !(nv?.line_type === "voip") && !ipqs?.VOIP) {
         warnings.push({ text: "AbstractAPI: VoIP-номер — лёгкий способ скрыть личность", severity: "medium" });
         riskScore += 15;
@@ -167,20 +168,20 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Fraud DB ──
+    // --- 3. МОШЕННИЧЕСКАЯ БАЗА ---
     const fraud = checkFraudDb(digits);
+    if (fraud.inDb) {
+      const total = fraud.entries.reduce((a, e) => a + e.reports, 0);
+      warnings.push({ text: `Найден в базе мошеннических номеров (${total} жалоб)`, severity: "high" });
+      riskScore += 50;
+    }
 
-    // ── Risk scoring & warnings ──
-    const warnings: Warning[] = [];
-    let riskScore = 0;
-
-    // numverify validity
+    // --- 4. ОСТАЛЬНЫЕ ПРОВЕРКИ ---
     if (nv && !nv.valid) {
       warnings.push({ text: "Номер не прошёл валидацию numverify — возможно, несуществующий", severity: "high" });
       riskScore += 35;
     }
 
-    // Pattern checks
     for (const p of RISK_PATTERNS) {
       if (p.re.test("+" + digits) || p.re.test(digits)) {
         warnings.push({ text: p.text, severity: p.severity });
@@ -188,12 +189,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Country risk from numverify
     if (nv?.country_code && HIGH_RISK_COUNTRIES[nv.country_code]) {
       riskScore += HIGH_RISK_COUNTRIES[nv.country_code];
     }
 
-    // Line type risk from numverify
     if (nv?.line_type === "premium_rate") {
       warnings.push({ text: "Premium rate номер — входящие/исходящие могут тарифицироваться", severity: "high" });
       riskScore += 40;
@@ -205,14 +204,14 @@ export async function POST(req: NextRequest) {
       riskScore += 20;
     }
 
-    // ── IPQualityScore signals ──
+    // IPQualityScore
     let ipqsFraudScore: number | null = null;
     let ipqsSpammer    = false;
     let ipqsVoip       = false;
     let ipqsPrepaid    = false;
     let ipqsRisky      = false;
     let ipqsActive     = false;
-    let ipqsDnc        = false;   // Do Not Call list
+    let ipqsDnc        = false;
 
     if (ipqs) {
       ipqsFraudScore = ipqs.fraud_score    ?? null;
@@ -223,7 +222,6 @@ export async function POST(req: NextRequest) {
       ipqsActive     = ipqs.active         === true;
       ipqsDnc        = ipqs.do_not_call    === true;
 
-      // IPQS fraud_score: 0-100 where 100 = very fraudulent
       if (ipqsFraudScore !== null) {
         if (ipqsFraudScore >= 85) {
           warnings.push({ text: `IPQualityScore: очень высокий риск мошенничества (score ${ipqsFraudScore}/100)`, severity: "high" });
@@ -255,13 +253,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Fraud DB
-    if (fraud.inDb) {
-      const total = fraud.entries.reduce((a, e) => a + e.reports, 0);
-      warnings.push({ text: `Найден в базе мошеннических номеров (${total} жалоб)`, severity: "high" });
-      riskScore += 50;
-    }
-
+    // --- 5. ФИНАЛЬНЫЙ СТАТУС ---
     const safeScore = Math.max(0, Math.min(100, 100 - riskScore));
     const status: "safe" | "suspicious" | "dangerous" =
       safeScore >= 72 ? "safe" : safeScore >= 44 ? "suspicious" : "dangerous";
@@ -276,7 +268,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       status,
       score: safeScore,
-      // numverify fields
       valid:               nv?.valid               ?? null,
       countryCode:         nv?.country_code         ?? ipqs?.country_code ?? null,
       countryName:         nv?.country_name         ?? null,
@@ -287,7 +278,6 @@ export async function POST(req: NextRequest) {
       numberFormatted:     nv?.number               ?? null,
       localFormat:         nv?.local_format         ?? null,
       internationalFormat: nv?.international_format ?? null,
-      // IPQS fields
       ipqsAvailable:   ipqs !== null,
       ipqsFraudScore,
       ipqsSpammer,
@@ -303,13 +293,10 @@ export async function POST(req: NextRequest) {
       ipqsCountry:     ipqs?.country       ?? null,
       ipqsTimezone:    ipqs?.timezone      ?? null,
       ipqsNameMatch:   ipqs?.name          ?? null,
-      // Fraud DB
       inFraudDb:       fraud.inDb,
       fraudDbMatches:  fraud.entries,
       reportCount,
-      // Analysis
       warnings,
-      // AbstractAPI
       abstAvailable:    abst !== null,
       abstValid,
       abstCarrier,
