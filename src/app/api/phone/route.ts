@@ -8,6 +8,7 @@ const ABSTRACTAPI_KEY = process.env.ABSTRACTAPI_KEY      ?? "3f6b5996cf32491db79
 const NUMVERIFY_BASE  = "http://apilayer.net/api/validate";
 const IPQS_BASE       = "https://ipqualityscore.com/api/json/phone";
 const ABSTRACTAPI_BASE = "https://phonevalidation.abstractapi.com/v1";
+const VOXLINK_BASE     = "http://num.voxlink.ru/get";
 
 // ─── FRAUD DATABASE ────────────────────────────────────────────────────────────
 
@@ -94,14 +95,16 @@ export async function POST(req: NextRequest) {
     let riskScore = 0;
 
     // ── Parallel API calls ──
-    const nvUrl         = `${NUMVERIFY_BASE}?access_key=${NUMVERIFY_KEY}&number=${encodeURIComponent(phone.trim())}&format=1`;
-    const ipqsUrl       = `${IPQS_BASE}/${IPQS_KEY}/${encodeURIComponent(phone.trim())}?strictness=1&allow_prepaid=true`;
-    const abstractUrl   = `${ABSTRACTAPI_BASE}/?api_key=${ABSTRACTAPI_KEY}&phone=${encodeURIComponent(phone.trim())}`;
+    const nvUrl        = `${NUMVERIFY_BASE}?access_key=${NUMVERIFY_KEY}&number=${encodeURIComponent(phone.trim())}&format=1`;
+    const ipqsUrl      = `${IPQS_BASE}/${IPQS_KEY}/${encodeURIComponent(phone.trim())}?strictness=1&allow_prepaid=true`;
+    const abstractUrl  = `${ABSTRACTAPI_BASE}/?api_key=${ABSTRACTAPI_KEY}&phone=${encodeURIComponent(phone.trim())}`;
+    const voxlinkUrl   = `${VOXLINK_BASE}/?num=${encodeURIComponent(phone.trim())}`;
 
-    const [nvRes, ipqsRes, abstractRes] = await Promise.allSettled([
+    const [nvRes, ipqsRes, abstractRes, voxlinkRes] = await Promise.allSettled([
       fetch(nvUrl,       { signal: AbortSignal.timeout(8000) }),
       fetch(ipqsUrl,     { signal: AbortSignal.timeout(8000) }),
       fetch(abstractUrl, { signal: AbortSignal.timeout(8000) }),
+      fetch(voxlinkUrl,  { signal: AbortSignal.timeout(8000) }),
     ]);
 
     // Parse numverify
@@ -125,8 +128,45 @@ export async function POST(req: NextRequest) {
       if (parsed?.phone) abst = parsed;
     }
 
+    // Parse Voxlink
+    let voxlink: any = null;
+    if (voxlinkRes.status === "fulfilled" && voxlinkRes.value.ok) {
+      try {
+        const text = await voxlinkRes.value.text();
+        const parsed = JSON.parse(text);
+        // Voxlink returns object or array; normalize
+        if (Array.isArray(parsed)) {
+          voxlink = parsed.length > 0 ? parsed[0] : null;
+        } else if (parsed && typeof parsed === "object" && !parsed.error) {
+          voxlink = parsed;
+        }
+      } catch { /* ignore parse errors */ }
+    }
+
     if (!nv && !ipqs && !abst) {
       return NextResponse.json({ error: "Не удалось получить данные от API" }, { status: 502 });
+    }
+
+    // --- 2b. VOXLINK ---
+    let voxlinkAvailable  = false;
+    let voxlinkOperator:  string | null = null;
+    let voxlinkRegion:    string | null = null;
+    let voxlinkTimeZone:  string | null = null;
+    let voxlinkMNP:       boolean       = false;
+    let voxlinkMNPFrom:   string | null = null;
+
+    if (voxlink) {
+      voxlinkAvailable = true;
+      // Field names may vary; try common keys
+      voxlinkOperator = voxlink.operator ?? voxlink.carrier ?? voxlink.mnc_name ?? null;
+      voxlinkRegion   = voxlink.region   ?? voxlink.city    ?? voxlink.location ?? null;
+      voxlinkTimeZone = voxlink.timezone ?? voxlink.tz      ?? null;
+      voxlinkMNP      = !!(voxlink.mnp || voxlink.is_mnp || voxlink.ported);
+      voxlinkMNPFrom  = voxlink.mnp_from ?? voxlink.original_operator ?? null;
+
+      if (voxlinkMNP) {
+        warnings.push({ text: `Voxlink: номер был перенесён (MNP) — изначально у оператора ${voxlinkMNPFrom ?? "другой оператор"}`, severity: "low" });
+      }
     }
 
     // --- 2. ОБРАБОТКА ABSTRACT API ---
@@ -306,6 +346,13 @@ export async function POST(req: NextRequest) {
       abstIntlFormat,
       abstLocalFormat,
       abstType,
+      // Voxlink
+      voxlinkAvailable,
+      voxlinkOperator,
+      voxlinkRegion,
+      voxlinkTimeZone,
+      voxlinkMNP,
+      voxlinkMNPFrom,
     });
   } catch (e: any) {
     console.error("[phone route]", e);
